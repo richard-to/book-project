@@ -1,0 +1,13 @@
+# config
+.env
+
+# python
+__pyenv__
+*.pyc
+.ipynb_checkpoints
+
+# system generated
+.DS_Store
+
+# vscode
+*code-workspace

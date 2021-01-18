@@ -1,0 +1,4 @@
+find-spark==1.4.2
+pyspark==3.0.1
+pyspark_dist_explore==3.0.1
+python-dotenv==0.10.5
