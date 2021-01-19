@@ -11,3 +11,4 @@ __pyenv__
 
 # vscode
 *code-workspace
+.vscode
