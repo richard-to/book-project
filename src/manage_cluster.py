@@ -1,3 +1,6 @@
+"""
+Basic Redshift cluster management CLI
+"""
 import argparse
 import configparser
 import json

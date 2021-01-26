@@ -1,6 +1,10 @@
 # config
 .env
-*.cfg
+etl.cfg
+etl-s3.cfg
+
+# data
+data
 
 # python
 __pyenv__

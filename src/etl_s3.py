@@ -1,8 +1,8 @@
 """
-Script to take raw SPL checkout data and format the data into a star schema
-in parquet format in S3.
+Performs ETL on raw SPL checkout data and create star schema in S3 in parquet format.
 """
 import configparser
+import os
 import re
 from typing import Tuple
 
@@ -42,6 +42,10 @@ def main():
     """
     config = configparser.ConfigParser()
     config.read("etl.cfg")
+
+    # Store AWS access key and secret as environment variables so we can access private S3 buckets
+    os.environ["AWS_ACCESS_KEY_ID"] = config.get("aws", "key")
+    os.environ["AWS_SECRET_ACCESS_KEY"] = config.get("aws", "secret")
 
     spark = SparkSession.builder.appName("SPL-Checkouts").getOrCreate()
 
@@ -345,6 +349,10 @@ def create_fact_spl_book_checkouts(
     """
     checkouts_df = link_temperature_to_checkouts(checkouts_df, weather_df)
     checkouts_df = link_publisher_id_to_checkouts(checkouts_df, bib_num_publisher_lookup_df, publishers_df)
+    checkouts_df = checkouts_df.withColumn(
+        "id",
+        F.md5(F.concat_ws("=", checkouts_df.bib_num, checkouts_df.item_barcode, checkouts_df.checkout_datetime).alias("id")),
+    )
     output_parquet(checkouts_df, output_path)
 
 
@@ -614,18 +622,18 @@ def generate_publishers(bib_num_publisher_lookup_df: DataFrame) -> DataFrame:
 
 
 def create_dim_checkout_datetimes(book_checkouts_df: DataFrame, output_path: str):
-    """Creates dim_checkout_datetime table in parquet format
+    """Creates dim_checkout_time table in parquet format
 
     Args:
         book_checkouts_df: SPL book checkouts
         output_path: Path to export parquet data. Can be S3, local, etc
     """
-    dim_checkout_datetimes_df = generate_checkout_datetimes(book_checkouts_df)
-    output_parquet(dim_checkout_datetimes_df, output_path)
+    dim_checkout_time_df = generate_checkout_times(book_checkouts_df)
+    output_parquet(dim_checkout_time_df, output_path)
 
 
-def generate_checkout_datetimes(book_checkouts_df: DataFrame) -> DataFrame:
-    """Generates checkout datetime data from book checkouts
+def generate_checkout_times(book_checkouts_df: DataFrame) -> DataFrame:
+    """Generates checkout time data from book checkouts
 
     Args:
         book_checkouts_df: SPL book checkouts
