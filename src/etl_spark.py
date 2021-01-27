@@ -14,7 +14,6 @@ from pyspark.sql.dataframe import DataFrame
 
 GOODREADS_DATE_FORMAT = "M/d/yyyy"
 SPL_CHECKOUT_DATETIME_FORMAT = "MM/dd/yyyy h:m:s a"
-WEATHER_DATA_SEP = "         "
 
 
 def main():
@@ -51,6 +50,7 @@ def main():
 
     try:
         limit_records = config.getint("main", "limit_records")
+        num_write_partitions = config.getint("main", "num_write_partitions")
 
         data_dict_df = spark.read.option("header", "true").csv(config.get("spl", "data_dict_path"))
         inventory_df = load_inventory_data(spark, data_dict_df, config.get("spl", "inventory_path"), limit_records)
@@ -62,12 +62,14 @@ def main():
             books_df,
             config.get("output", "dim_subject_path"),
             config.get("output", "br_book_subject_path"),
+            num_write_partitions,
         )
 
         create_dim_authors(
             books_df,
             config.get("output", "dim_author_path"),
             config.get("output", "br_book_author_path"),
+            num_write_partitions,
         )
 
         publishers_map_df = load_publishers_data(spark, config.get("publishers", "data_path"))
@@ -75,12 +77,21 @@ def main():
             books_df,
             publishers_map_df,
             config.get("output", "dim_publisher_path"),
+            num_write_partitions,
         )
 
-        create_dim_books(books_df, config.get("output", "dim_book_path"))
+        create_dim_books(
+            books_df,
+            config.get("output", "dim_book_path"),
+            num_write_partitions,
+        )
 
         checkouts_df = load_checkouts_data(spark, data_dict_df, config.get("spl", "checkouts_path"), limit_records)
-        create_dim_checkout_datetimes(checkouts_df, config.get("output", "dim_checkout_time_path"))
+        create_dim_checkout_datetimes(
+            checkouts_df,
+            config.get("output", "dim_checkout_time_path"),
+            num_write_partitions,
+        )
 
         # Fact table
         weather_df = load_weather_data(spark, config.get("weather", "data_path"))
@@ -90,6 +101,7 @@ def main():
             bib_num_publisher_lookup_df,
             publishers_df,
             config.get("output", "fact_spl_book_checkout_path"),
+            num_write_partitions,
         )
     finally:
         spark.stop()
@@ -131,15 +143,24 @@ def load_weather_data(spark: SparkSession, data_path: str) -> DataFrame:
     # The weather data delimits columns by spaces, but there can be a different
     # amount of spaces between each column.
     #
-    # WEATHER_DATA_SEP separator is the minimum number of spaces to split the columns.
-    #
-    # Afterwards we'll need to remove the trailing whitespace and cast the data types
-    df = spark.read.option("sep", WEATHER_DATA_SEP).csv(data_path)
+    # Amazon EMR is not on Spark 3, so multi-character delimiters aren't supported
+    # WEATHER_DATA_SEP = "         "
+    # df = spark.read.option("sep", WEATHER_DATA_SEP).csv(data_path)
+    # return df.select(
+    #    F.trim(df._c0).cast(IntegerType()).alias("month"),
+    #    F.trim(df._c1).cast(IntegerType()).alias("day"),
+    #    F.trim(df._c2).cast(IntegerType()).alias("year"),
+    #    F.trim(df._c3).cast(FloatType()).alias("temperature"),
+    # )
+
+    # Spark 2 compatible approach
+    lines = spark.sparkContext.textFile(data_path)
+    df = lines.map(lambda l: l.split()).toDF()
     return df.select(
-        F.trim(df._c0).cast(IntegerType()).alias("month"),
-        F.trim(df._c1).cast(IntegerType()).alias("day"),
-        F.trim(df._c2).cast(IntegerType()).alias("year"),
-        F.trim(df._c3).cast(FloatType()).alias("temperature"),
+        F.trim(df._1).cast(IntegerType()).alias("month"),
+        F.trim(df._2).cast(IntegerType()).alias("day"),
+        F.trim(df._3).cast(IntegerType()).alias("year"),
+        F.trim(df._4).cast(FloatType()).alias("temperature"),
     )
 
 
@@ -338,6 +359,7 @@ def create_fact_spl_book_checkouts(
     bib_num_publisher_lookup_df: DataFrame,
     publishers_df: DataFrame,
     output_path: str,
+    num_write_partitions: int,
 ):
     """Creates fact_spl_book_checkout table in parquet format
 
@@ -345,7 +367,9 @@ def create_fact_spl_book_checkouts(
         checkouts_df: SPL checkouts data
         weather_df: Weather data
         bib_num_publisher_lookup_df: Bib number, publisher, and normalized key
-        publishers_df: Publisher data
+        publishers_df: Publisher data,
+        output_path: Path to export fact table. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
     """
     checkouts_df = link_temperature_to_checkouts(checkouts_df, weather_df)
     checkouts_df = link_publisher_id_to_checkouts(checkouts_df, bib_num_publisher_lookup_df, publishers_df)
@@ -353,10 +377,15 @@ def create_fact_spl_book_checkouts(
         "id",
         F.md5(F.concat_ws("=", checkouts_df.bib_num, checkouts_df.item_barcode, checkouts_df.checkout_datetime).alias("id")),
     )
-    output_parquet(checkouts_df, output_path)
+    output_parquet(checkouts_df.coalesce(num_write_partitions), output_path)
 
 
-def create_dim_subjects(books_df: DataFrame, dim_output_path: str, br_output_path: str):
+def create_dim_subjects(
+    books_df: DataFrame,
+    dim_output_path: str,
+    br_output_path: str,
+    num_write_partitions: int,
+):
     """Creates dim_subject and br_book_subject tables in parquet format
 
     Since a book can be linked to multiple subjects, we will need to generate both a bridge
@@ -366,12 +395,13 @@ def create_dim_subjects(books_df: DataFrame, dim_output_path: str, br_output_pat
         books_df: SPL inventory with Goodreads data
         dim_output_path: Path to export dimension table. Can be S3, local, etc
         br_output_path: Path to export bridge table. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
     """
     dim_subjects_df = generate_subjects(books_df)
-    output_parquet(dim_subjects_df, dim_output_path)
+    output_parquet(dim_subjects_df.coalesce(num_write_partitions), dim_output_path)
 
     br_book_subjects = generate_book_subjects(books_df, dim_subjects_df)
-    output_parquet(br_book_subjects, br_output_path)
+    output_parquet(br_book_subjects.coalesce(num_write_partitions), br_output_path)
 
 
 def generate_subjects(books_df: DataFrame) -> DataFrame:
@@ -431,7 +461,7 @@ def generate_book_subjects(books_df: DataFrame, subjects_df: DataFrame) -> DataF
     )
 
 
-def create_dim_authors(books_df: DataFrame, dim_output_path: str, br_output_path: str):
+def create_dim_authors(books_df: DataFrame, dim_output_path: str, br_output_path: str, num_write_partitions: int):
     """Creates dim_author and br_book_author tables in parquet format
 
     Since a book can be linked to multiple authors, we will need to generate both a bridge
@@ -441,14 +471,15 @@ def create_dim_authors(books_df: DataFrame, dim_output_path: str, br_output_path
         books_df: SPL inventory
         dim_output_path: Path to export dimension table. Can be S3, local, etc
         br_output_path: Path to export bridge table. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
     """
     authors_df = generate_authors(books_df)
 
     dim_authors_df = authors_df.select(authors_df.id, authors_df.author.alias("name"))
-    output_parquet(dim_authors_df, dim_output_path)
+    output_parquet(dim_authors_df.coalesce(num_write_partitions), dim_output_path)
 
     br_book_subjects = generate_book_authors(books_df, authors_df)
-    output_parquet(br_book_subjects, br_output_path)
+    output_parquet(br_book_subjects.coalesce(num_write_partitions), br_output_path)
 
 
 def generate_authors(books_df):
@@ -524,7 +555,7 @@ def generate_book_authors(books_df, authors_df):
         books_df
         .select(
             books_df.bib_num,
-            F.explode(F.split(books_df.gr_authors, ", ")).alias("author"),
+            F.explode(F.split(books_df.gr_authors, "/")).alias("author"),
         )
     )
     book_authors_df = spl_authors_df.union(gr_authors_df).dropna()
@@ -543,7 +574,8 @@ def generate_book_authors(books_df, authors_df):
 def create_dim_publishers(
     books_df: DataFrame,
     publishers_map_df: DataFrame,
-    output_path: str
+    output_path: str,
+    num_write_partitions: int,
 ) -> Tuple[DataFrame, DataFrame]:
     """Creates dim_publisher table in parquet format
 
@@ -554,6 +586,7 @@ def create_dim_publishers(
         books_df: SPL inventory
         publishers_map_df: Map of raw publishers to "official" publishers
         output_path: Path to export dimension table. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
 
     Returns:
         We need bib_num_publisher_lookup_df and publishers_df to link publisher_id to checkouts
@@ -562,7 +595,7 @@ def create_dim_publishers(
     publishers_df = generate_publishers(bib_num_publisher_lookup_df)
 
     dim_publishers_df = publishers_df.select(publishers_df.id, publishers_df.publisher.alias("name"))
-    output_parquet(dim_publishers_df, output_path)
+    output_parquet(dim_publishers_df.coalesce(num_write_partitions), output_path)
 
     return bib_num_publisher_lookup_df, publishers_df
 
@@ -621,15 +654,16 @@ def generate_publishers(bib_num_publisher_lookup_df: DataFrame) -> DataFrame:
     )
 
 
-def create_dim_checkout_datetimes(book_checkouts_df: DataFrame, output_path: str):
+def create_dim_checkout_datetimes(book_checkouts_df: DataFrame, output_path: str, num_write_partitions: int):
     """Creates dim_checkout_time table in parquet format
 
     Args:
         book_checkouts_df: SPL book checkouts
         output_path: Path to export parquet data. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
     """
     dim_checkout_time_df = generate_checkout_times(book_checkouts_df)
-    output_parquet(dim_checkout_time_df, output_path)
+    output_parquet(dim_checkout_time_df.coalesce(num_write_partitions), output_path)
 
 
 def generate_checkout_times(book_checkouts_df: DataFrame) -> DataFrame:
@@ -661,15 +695,16 @@ def generate_checkout_times(book_checkouts_df: DataFrame) -> DataFrame:
     )
 
 
-def create_dim_books(books_df: DataFrame, output_path: str):
+def create_dim_books(books_df: DataFrame, output_path: str, num_write_partitions: int):
     """Creates books dimension in parquet format
 
     Args:
         book_df: SPL book data with Goodreads data
         output_path: Path to export dimension table. Can be S3, local, etc
+        num_write_partitions: Use less partitions when writing to S3 to improve perf
     """
     dim_book_df = generate_books(books_df)
-    output_parquet(dim_book_df, output_path)
+    output_parquet(dim_book_df.coalesce(num_write_partitions), output_path)
 
 
 def generate_books(books_df):
@@ -687,7 +722,9 @@ def generate_books(books_df):
         books_df.bib_num,
         clean_title_udf(books_df.raw_title, books_df.gr_title).alias("title"),
         books_df.isbns,
-        clean_publication_year_udf(books_df.raw_publication_year, books_df.gr_publication_date).alias("publication_year"),
+        clean_publication_year_udf(
+            books_df.raw_publication_year,
+            books_df.gr_publication_date).cast(IntegerType()).alias("publication_year"),
         books_df.gr_average_rating.alias("average_rating"),
         books_df.gr_ratings_count.alias("ratings_count"),
         books_df.gr_text_reviews_count.alias("text_reviews_count"),
