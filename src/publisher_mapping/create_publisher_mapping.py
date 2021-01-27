@@ -15,7 +15,7 @@ import pyspark.sql.functions as F
 
 
 config = configparser.ConfigParser()
-config.read("etl.cfg")
+config.read("../etl.cfg")
 
 ES_HOST = config.get("publishers", "elasticsearch_host")
 ES_INDEX_NAME = "book_publishers"

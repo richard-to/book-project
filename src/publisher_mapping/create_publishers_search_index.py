@@ -8,7 +8,7 @@ from elasticsearch import Elasticsearch
 import pandas
 
 config = configparser.ConfigParser()
-config.read("etl.cfg")
+config.read("../etl.cfg")
 
 ES_HOST = config.get("publishers", "elasticsearch_host")
 
